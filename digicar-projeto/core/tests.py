@@ -34,6 +34,7 @@ from storage.interfaces import ArquivoStorage
 from storage.local_adapter import LocalStorageAdapter
 from storage.manager import StorageManager
 from storage.mongo_adapter import MongoStorageAdapter
+from storage.proxy import CachedArquivoStorage
 from storage.service import ArquivoService
 
 
@@ -110,10 +111,26 @@ class StorageManagerTests(SimpleTestCase):
         with override_settings(FILE_STORAGE="local"):
             self.assertIs(manager.get_adapter_configurado(), manager.get_local_adapter())
         with override_settings(FILE_STORAGE="mongo"):
-            self.assertIs(manager.get_adapter_configurado(), manager.get_mongo_adapter())
+            self.assertIs(manager.get_adapter_configurado(), manager.get_mongo_storage())
         with override_settings(FILE_STORAGE="outro"):
             with self.assertRaises(ValueError):
                 manager.get_adapter_configurado()
+
+    @override_settings(STORAGE_CACHE_MAX_BYTES=1024)
+    @patch("storage.manager.MongoStorageAdapter")
+    def test_manager_entrega_proxy_do_gridfs(self, _):
+        manager = StorageManager.get_instance()
+        storage = manager.get_mongo_storage()
+
+        self.assertIsInstance(storage, CachedArquivoStorage)
+        self.assertIs(storage._storage, manager.get_mongo_adapter())
+
+    @override_settings(STORAGE_CACHE_MAX_BYTES=0)
+    @patch("storage.manager.MongoStorageAdapter")
+    def test_manager_sem_cache_entrega_adapter_real(self, _):
+        manager = StorageManager.get_instance()
+
+        self.assertIs(manager.get_mongo_storage(), manager.get_mongo_adapter())
 
 
 class AdapterFalso(ArquivoStorage):
@@ -228,3 +245,141 @@ class MongoStorageAdapterTests(SimpleTestCase):
         MongoStorageAdapter(MagicMock()).excluir("id-invalido")
 
         gridfs.return_value.delete.assert_not_called()
+
+
+class StorageEmMemoria(ArquivoStorage):
+    """Servico real falso: guarda os arquivos num dict e registra cada chamada."""
+
+    def __init__(self, arquivos=None):
+        self.arquivos = dict(arquivos or {})
+        self.chamadas = []
+
+    def conectar(self):
+        self.chamadas.append("conectar")
+
+    def desconectar(self):
+        self.chamadas.append("desconectar")
+
+    def salvar(self, nome, conteudo):
+        self.chamadas.append("salvar")
+        self.arquivos[nome] = conteudo
+        return nome
+
+    def buscar(self, identificador):
+        self.chamadas.append("buscar")
+        if identificador not in self.arquivos:
+            raise FileNotFoundError(identificador)
+        return self.arquivos[identificador]
+
+    def excluir(self, identificador):
+        self.chamadas.append("excluir")
+        self.arquivos.pop(identificador, None)
+
+    def existe(self, identificador):
+        self.chamadas.append("existe")
+        return identificador in self.arquivos
+
+
+class CachedArquivoStorageTests(SimpleTestCase):
+    def setUp(self):
+        self.real = StorageEmMemoria({"a": b"aaaa", "b": b"bbbb", "c": b"cccc"})
+        self.proxy = CachedArquivoStorage(self.real, limite_bytes=1024)
+
+    def test_proxy_implementa_a_mesma_interface(self):
+        self.assertIsInstance(self.proxy, ArquivoStorage)
+
+    def test_segunda_busca_vem_do_cache(self):
+        self.assertEqual(self.proxy.buscar("a"), b"aaaa")
+        self.assertEqual(self.proxy.buscar("a"), b"aaaa")
+
+        self.assertEqual(self.real.chamadas.count("buscar"), 1)
+
+    def test_service_nao_conecta_ao_servico_real_quando_o_cache_responde(self):
+        service = ArquivoService(self.proxy)
+
+        service.buscar("a")
+        self.assertEqual(self.real.chamadas, ["conectar", "buscar", "desconectar"])
+
+        self.real.chamadas.clear()
+        self.assertEqual(service.buscar("a"), b"aaaa")
+        self.assertEqual(self.real.chamadas, [])
+
+    def test_arquivo_inexistente_propaga_erro_e_nao_vai_para_o_cache(self):
+        service = ArquivoService(self.proxy)
+
+        with self.assertRaises(FileNotFoundError):
+            service.buscar("x")
+        self.assertEqual(self.real.chamadas, ["conectar", "buscar", "desconectar"])
+
+        self.real.arquivos["x"] = b"novo"
+        self.assertEqual(service.buscar("x"), b"novo")
+
+    def test_excluir_remove_do_cache(self):
+        self.proxy.buscar("a")
+        self.proxy.excluir("a")
+
+        with self.assertRaises(FileNotFoundError):
+            self.proxy.buscar("a")
+
+    def test_salvar_com_o_mesmo_nome_invalida_o_cache(self):
+        self.proxy.buscar("a")
+        self.proxy.salvar("a", b"atualizado")
+
+        self.assertEqual(self.proxy.buscar("a"), b"atualizado")
+
+    def test_existe_responde_pelo_cache(self):
+        self.proxy.buscar("a")
+        self.real.chamadas.clear()
+
+        self.assertTrue(self.proxy.existe("a"))
+        self.assertFalse(self.proxy.existe("x"))
+        self.assertEqual(self.real.chamadas, ["existe"])
+
+    def test_limite_descarta_o_arquivo_usado_ha_mais_tempo(self):
+        proxy = CachedArquivoStorage(self.real, limite_bytes=8)
+        proxy.buscar("a")
+        proxy.buscar("b")
+        proxy.buscar("a")  # "a" passa a ser o mais recente
+        proxy.buscar("c")  # estoura o limite: sai "b"
+        self.real.chamadas.clear()
+
+        proxy.buscar("a")
+        proxy.buscar("c")
+        self.assertEqual(self.real.chamadas, [])
+        proxy.buscar("b")
+        self.assertEqual(self.real.chamadas, ["buscar"])
+
+    def test_arquivo_maior_que_o_limite_nao_vai_para_o_cache(self):
+        proxy = CachedArquivoStorage(self.real, limite_bytes=3)
+
+        proxy.buscar("a")
+        proxy.buscar("a")
+
+        self.assertEqual(self.real.chamadas.count("buscar"), 2)
+
+    def test_limpar_cache(self):
+        self.proxy.buscar("a")
+        self.proxy.limpar_cache()
+        self.proxy.buscar("a")
+
+        self.assertEqual(self.real.chamadas.count("buscar"), 2)
+
+    def test_exclusao_durante_uma_busca_nao_volta_para_o_cache(self):
+        proxy = self.proxy
+        buscar_real = self.real.buscar
+
+        def buscar_e_excluir(identificador):
+            conteudo = buscar_real(identificador)
+            proxy.excluir(identificador)  # outra requisicao exclui no meio da busca
+            return conteudo
+
+        self.real.buscar = buscar_e_excluir
+        proxy.buscar("a")
+        self.real.buscar = buscar_real
+
+        with self.assertRaises(FileNotFoundError):
+            proxy.buscar("a")
+
+    def test_limite_invalido_e_rejeitado(self):
+        with self.assertRaises(ValueError):
+            CachedArquivoStorage(self.real, limite_bytes=0)
