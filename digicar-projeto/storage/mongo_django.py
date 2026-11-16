@@ -9,7 +9,7 @@ from .service import ArquivoService
 
 class MongoGridFSStorage(Storage):
     def _service(self):
-        return ArquivoService(StorageManager.get_instance().get_mongo_adapter())
+        return ArquivoService(StorageManager.get_instance().get_mongo_storage())
 
     def _open(self, name, mode="rb"):
         return ContentFile(self._service().buscar(name), name=name)

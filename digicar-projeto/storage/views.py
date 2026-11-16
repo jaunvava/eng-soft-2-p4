@@ -10,7 +10,7 @@ from .service import ArquivoService
 @require_GET
 def servir_gridfs(request, identificador):
     try:
-        conteudo = ArquivoService(StorageManager.get_instance().get_mongo_adapter()).buscar(identificador)
+        conteudo = ArquivoService(StorageManager.get_instance().get_mongo_storage()).buscar(identificador)
     except (FileNotFoundError, ValueError):
         raise Http404("Arquivo não encontrado")
     tipo, _ = mimetypes.guess_type(identificador)

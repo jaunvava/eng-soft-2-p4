@@ -122,7 +122,7 @@ Sem `DB_APP_ROUTES`, os apps Django continuam no `default`. Cada app roteado dev
 
 Uploads usam filesystem local por padrão (`FILE_STORAGE=local`). Com `FILE_STORAGE=mongo`, `MONGO_URI` e `MONGO_DATABASE` configuram o MongoDB/GridFS, e os `ImageField`/`FileField` Django passam a gravar e servir arquivos pelo GridFS.
 
-O app `storage` combina **Singleton** e **Adapter**: `StorageManager.get_instance()` (`storage/manager.py`) guarda os adapters `LocalStorageAdapter` e `MongoStorageAdapter`, que implementam a interface `ArquivoStorage`. O `ArquivoService` recebe um adapter e executa cada operação entre `conectar()` e `desconectar()`. Detalhes em [`docs/padroes-de-projeto.md`](docs/padroes-de-projeto.md).
+O app `storage` combina **Singleton**, **Adapter** e **Proxy**: `StorageManager.get_instance()` (`storage/manager.py`) guarda os adapters `LocalStorageAdapter` e `MongoStorageAdapter`, que implementam a interface `ArquivoStorage`. O `ArquivoService` recebe um adapter e executa cada operação entre `conectar()` e `desconectar()`. Para o GridFS, o manager entrega (`get_mongo_storage()`) o proxy `CachedArquivoStorage`, que guarda em memória os arquivos já lidos. O limite é `STORAGE_CACHE_MAX_BYTES` (padrão 32 MB; `0` desliga o cache). Detalhes em [`docs/padroes-de-projeto.md`](docs/padroes-de-projeto.md).
 
 ### Padrões de projeto
 
@@ -134,6 +134,7 @@ O app `storage` combina **Singleton** e **Adapter**: `StorageManager.get_instanc
 | **Facade** | `financeiro/facade.py` (`FinanceiroFacade`) | As views de baixa chamam `registrar_baixa_receber()`/`registrar_baixa_pagar()`. A facade esconde a conversão do valor, a estratégia de pagamento, a criação da baixa, a atualização de saldo/status e a transação. |
 | **Factory Method** | `relatorios/operacionais.py` | Cada `RelatorioCreator` implementa `criar_relatorio()` e devolve o relatório operacional (clientes, veículos, estoque, OS). Substitui o `if/elif` por tipo na view. |
 | **Template Method** | `relatorios/exportadores.py` | `ExportadorRelatorio.exportar()` fixa as etapas (validar → cabeçalho → linhas → rodapé → resposta). `ExportadorCSV` e `ExportadorJSON` implementam só o que muda. Usado na exportação dos relatórios operacionais e de contas a receber. |
+| **Proxy** | `storage/proxy.py` (`CachedArquivoStorage`) | Fica na frente do `MongoStorageAdapter` com a mesma interface `ArquivoStorage`. Imagens já servidas vêm do cache em memória (LRU com limite em bytes), e a conexão com o MongoDB só é aberta quando o cache não resolve. O `ArquivoService` não mudou. |
 
 A documentação completa (contexto, problema, solução, diagramas e comparação com os exemplos de aula) está em [`docs/padroes-de-projeto.md`](docs/padroes-de-projeto.md).
 

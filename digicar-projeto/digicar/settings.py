@@ -97,6 +97,8 @@ DATABASE_ROUTERS = ['digicar.routers.AppDatabaseRouter']
 FILE_STORAGE = os.environ.get('FILE_STORAGE', 'local').lower()
 MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017')
 MONGO_DATABASE = os.environ.get('MONGO_DATABASE', 'digicar')
+# Limite em bytes do proxy de cache do GridFS (storage/proxy.py). 0 desliga o cache.
+STORAGE_CACHE_MAX_BYTES = int(os.environ.get('STORAGE_CACHE_MAX_BYTES', 32 * 1024 * 1024))
 if FILE_STORAGE == 'mongo':
     STORAGES = {
         'default': {'BACKEND': 'storage.mongo_django.MongoGridFSStorage'},
